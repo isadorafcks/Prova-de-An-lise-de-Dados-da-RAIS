@@ -1,0 +1,283 @@
+---
+title: "Análise de ddos da RAIS _ Isadora"
+author: "Isadora Russo Friedericks"
+date: "2025-10-19"
+output: html_document
+---
+
+# Prova Prática: Análise de Dados da RAIS (2010-2018)
+# Chamada 049/2025 – Atlas do Estado Brasileiro (IPEA)
+
+# Isadora Russo Friedericks
+
+###### BASE DE DADOS BRUTA #####################
+
+### 1 etapa: baixar bibliotecas necessárias para os próximos passos
+
+library(googledrive)
+library(data.table)
+library(ggplot2)
+
+# 2 etapa: Por ser um a base gigantesca, não é possível baixar os dados no próprio computador. 
+# Por isso, usamos o link público da pasta do Drive criada por mim que contém os arquivos da RAIS, separados por estado e ano.
+
+url_pasta <- "https://drive.google.com/drive/folders/1R0Rb9_ffNVipDFvocq-X7esPHPVpQuHM"
+arquivos <- drive_ls(as_id(url_pasta))
+dir.create("dados_rais", showWarnings = FALSE)
+
+
+# 3 etapa: O código vai criar uma pasta local chamada “dados_rais” e fazer um loop que percorre todos os arquivos da pasta do Drive, baixando um por um.
+# Assim, garantimos que todos os dados necessários estejam disponíveis localmente, sem precisar fazer o download manualmente.
+
+for (i in seq_len(nrow(arquivos))) {
+  nome <- arquivos$name[i]
+  destino <- file.path("dados_rais", paste0(nome, ".csv"))
+  if (!file.exists(destino)) {
+    message("baixando: ", nome)
+    drive_download(as_id(arquivos$id[i]), path = destino, overwrite = TRUE)
+  }
+}
+
+# Vamos criar uma lista com o caminho de todos os arquivos que estão na pasta “dados_rais”.
+
+arquivos_locais <- list.files("dados_rais", full.names = TRUE)
+
+# E ler o arquivo com funções específicas para bases grandes
+
+ler_arquivo <- function(caminho) {
+  tryCatch(fread(caminho, encoding = "Latin-1", showProgress = FALSE), error = function(e) NULL)
+}
+
+
+# 4 etapa:A partir de agora, temos que organizar os dados por ano.
+# Para isso, vamos criar uma função que junta todos os arquivos referentes a um mesmo período.
+# Ela identifica, com o comando grep(), quais arquivos pertencem a determinado ano (por exemplo, “10” para 2010)
+
+
+montar_base <- function(ano) {
+  arqs <- grep(ano, arquivos_locais, value = TRUE)
+  rbindlist(lapply(arqs, ler_arquivo), fill = TRUE)
+}
+
+# 5 etapa: Por fim, basta juntar todos os anos numa mesma base para que possamos realizar o que foi pedido
+
+rais2010 <- montar_base("10")
+rais2014 <- montar_base("14")
+rais2018 <- montar_base("18")´
+
+rais_todas <- rbindlist(list(rais2010, rais2014, rais2018), fill = TRUE)
+
+
+############# BASE DE DADOS AGREGADA COM UMA UNIDADE DE OBSERVAÇÃO "MUNICÍPIO ANO"  ###################
+
+
+#Nesta fase vamos criar a base agregada “município-ano”, resumindo as informações da RAIS em nível local e temporal que foram pedidos. 
+# Nela, calcularems o total de empregos, os vínculos CLT e públicos, além dos salários médios gerais, por tipo de vínculo e por raça. 
+# Também incluiremos a razão entre os salários de brancos e negros.
+
+
+# Eapa 1 : Como devemos separar os indivíduos entre CLT e Público e não temos nenhuma coluna pronta que apresente essa denominação, vamos descobrir todas as respostas possíveis na coluna subsetor_ibge e assim utilizar o dicionário via subsetor de atividade do IBGE a fim de criar uma nova coluna setor_publico
+
+# Usamos essa função para descobrir quais são os tipos de respostas possíveis
+unique(rais_todas$subsetor_ibge)
+
+# Para assim, definir os subsetores que correspondem ao setor público
+
+subsetores_publico <- c(
+  "Administração pública direta e autárquica",
+  "Ensino",
+  "Serviços industriais de utilidade pública"
+)
+
+# Criar a coluna booleana setor_publico
+rais_todas[, setor_publico := subsetor_ibge %in% subsetores_publico]
+
+head(rais_todas)
+
+
+# Etapa 2: Agora com todas as colunas necessárias no nosso data frame rais_todas vamos criaruma base agregada município-ano
+# e calcular as razões entre os salários de brancos e negros para todas as categorias pedidas, permitindo analisar a desigualdade salarial racial de forma resumida e comparável entre municípios e anos.
+
+rais_agregada <- rais_todas[, .(
+  # Empregos
+  emprego_total = .N,
+  emprego_clt = sum(grepl("^CLT", tipo_vinculo, ignore.case = TRUE), na.rm = TRUE),
+  emprego_setor_publico = sum(setor_publico, na.rm = TRUE),
+  
+  # Salários médios gerais
+  salario_medio_total = mean(valor_remuneracao_media, na.rm = TRUE),
+  salario_medio_clt = mean(valor_remuneracao_media[grepl("^CLT", tipo_vinculo, ignore.case = TRUE)], na.rm = TRUE),
+  salario_medio_publico = ifelse(sum(setor_publico, na.rm = TRUE) > 0,
+                                 mean(valor_remuneracao_media[setor_publico == TRUE], na.rm = TRUE),
+                                 0),
+  
+  # Salários médios brancos
+  salario_brancos_total = mean(valor_remuneracao_media[raca_cor == "Branca"], na.rm = TRUE),
+  salario_brancos_clt = mean(valor_remuneracao_media[raca_cor == "Branca" & grepl("^CLT", tipo_vinculo, ignore.case = TRUE)], na.rm = TRUE),
+  salario_brancos_publico = ifelse(sum(setor_publico[raca_cor == "Branca"], na.rm = TRUE) > 0,
+                                   mean(valor_remuneracao_media[raca_cor == "Branca" & setor_publico == TRUE], na.rm = TRUE),
+                                   0),
+  
+  # Salários médios negros 
+  salario_negros_total = mean(valor_remuneracao_media[raca_cor %in% c("Preta","Parda")], na.rm = TRUE),
+  salario_negros_clt = mean(valor_remuneracao_media[raca_cor %in% c("Preta","Parda") & grepl("^CLT", tipo_vinculo, ignore.case = TRUE)], na.rm = TRUE),
+  salario_negros_publico = ifelse(sum(setor_publico[raca_cor %in% c("Preta","Parda")], na.rm = TRUE) > 0,
+                                  mean(valor_remuneracao_media[raca_cor %in% c("Preta","Parda") & setor_publico == TRUE], na.rm = TRUE),
+                                  0),
+  
+  # Razões brancos / negros
+  razao_total = mean(valor_remuneracao_media[raca_cor == "Branca"], na.rm = TRUE) /
+    mean(valor_remuneracao_media[raca_cor %in% c("Preta","Parda")], na.rm = TRUE),
+  razao_clt = mean(valor_remuneracao_media[raca_cor == "Branca" & grepl("^CLT", tipo_vinculo, ignore.case = TRUE)], na.rm = TRUE) /
+    mean(valor_remuneracao_media[raca_cor %in% c("Preta","Parda") & grepl("^CLT", tipo_vinculo, ignore.case = TRUE)], na.rm = TRUE),
+  razao_publico = ifelse(sum(setor_publico[raca_cor %in% c("Branca","Preta","Parda")], na.rm = TRUE) > 0,
+                         mean(valor_remuneracao_media[raca_cor == "Branca" & setor_publico == TRUE], na.rm = TRUE) /
+                           mean(valor_remuneracao_media[raca_cor %in% c("Preta","Parda") & setor_publico == TRUE], na.rm = TRUE),
+                         0)
+), by = .(ano, id_municipio)]
+
+#Visualizar e salvar
+head(rais_agregada)
+fwrite(rais_agregada, "rais_agregado_municipio_ano.csv")
+
+
+####### VIZUALIZAÇÃO DE DADOS #############
+
+# 1.Crie uma visualização que permita captar de forma clara a dispersão da razão entre os salários de brancos e
+#negros no território nacional para cada categoria (Total, clt público)
+
+
+####  DISPERSÃO DOS SALÁRIOS MÉDIOS: Brancos x Negros ( TOTAL)
+
+ggplot(rais_agregada, aes(x = salario_negros_total, y = salario_brancos_total)) +
+  geom_point(alpha = 0.3) +
+  labs(title = "Dispersão dos salários médios: brancos x negros (Total)",
+       x = "Salário médio trabalhadores negros",
+       y = "Salário médio trabalhadores brancos") +
+  theme_minimal()
+
+#Podemos observar uma tendência geral em que a maior parte dos pontos está acima da linha imaginária de 45°,
+#o que indica que, em quase todos os municípios, os trabalhadores brancos ganham, em média, mais do que os trabalhadores negros. 
+
+
+#### DISPERSÃO DOS SALÁRIOS MÉDIOS: Brancos X Negros (CLT)
+
+ggplot(rais_agregado1, aes(x = salario_negros_clt, y = salario_brancos_clt)) +
+  geom_point(alpha = 0.3, color = "blue") +
+  labs(title = "Dispersão dos salários médios: brancos x negros (CLT)",
+       x = "Salário médio trabalhadores negros",
+       y = "Salário médio trabalhadores brancos") +
+  theme_minimal()
+
+#Também conseguimos observar essa tendência em que a maior parte dos pontos está acima da linha imaginária de 45°,
+#o que indica que, em quase todos os municípios, os trabalhadores brancos ganham, em média, mais do que os trabalhadores negros. 
+
+
+#### DISPERSÃO DOS SALÁRIOS MÉDIOS: Brancos X Negros (SETOR PÚBLICO)
+
+ggplot(rais_agregada, aes(x = salario_negros_publico, y = salario_brancos_publico)) +
+  geom_point(alpha = 0.3, color = "green") +
+  labs(title = "Dispersão dos salários médios: brancos x negros (Setor Público)",
+       x = "Salário médio trabalhadores negros",
+       y = "Salário médio trabalhadores brancos") +
+  theme_minimal()
+
+#Também conseguimos observar essa tendência em que a maior parte dos pontos está acima da linha imaginária de 45°,
+#o que indica que, em quase todos os municípios, os trabalhadores brancos ganham, em média, mais do que os trabalhadores negros também no setor publico. 
+
+
+
+# 2.Crie uma visualização que mostre como evoluíram essas razões ao longo destes 8 anos para cada uma das categorias
+
+
+##### EVOLUÇÃO DA RAZÃO TOTAL ENTRE SALÁRIOS DE BRANCOS E NEGROS ( TOTAL) #####
+
+# Garantir que a coluna ano seja numérica
+rais_agregada$ano <- as.numeric(as.character(rais_agregada$ano))
+
+# Agregar por ano (média da razão total)
+razao_total_evolucao <- aggregate(razao_total ~ ano,
+                                  data = rais_agregada,
+                                  FUN = mean, na.rm = TRUE)
+
+#construindo o gráfico para  TOTAL
+ggplot(razao_total_evolucao, aes(x = ano, y = razao_total)) +
+  geom_line(size = 1, color = "blue") +
+  geom_point(size = 2, color = "red") +
+  labs(
+    title = "Evolução da razão entre salários de brancos e negros (Total)",
+    x = "Ano",
+    y = "Razão média (Brancos / Negros)"
+  ) +
+  scale_x_continuous(breaks = c(2010, 2014, 2018)) +
+  scale_y_continuous(
+    limits = c(min(razao_total_evolucao$razao_total)*0.95, 
+               max(razao_total_evolucao$razao_total)*1.05),
+    breaks = scales::pretty_breaks(n = 5)  # define 5 quebras "bonitas"
+  ) +
+  theme_minimal()
+
+
+##### EVOLUÇÃO DA RAZÃO TOTAL ENTRE SALÁRIOS DE BRANCOS E NEGROS ( CLT ) #####
+
+# Garantir que a coluna ano seja numérica
+rais_agregada$ano <- as.numeric(as.character(rais_agregada$ano))
+
+# Agregar por ano a razão CLT
+razao_clt_evolucao <- aggregate(razao_clt ~ ano,
+                                data = rais_agregada,
+                                FUN = function(x) mean(x, na.rm = TRUE))
+
+# Gráfico CLT
+ggplot(razao_clt_evolucao, aes(x = ano, y = razao_clt)) +
+  geom_line(size = 1, color = "blue") +
+  geom_point(size = 2, color = "red") +
+  labs(
+    title = "Evolução da razão entre salários de brancos e negros (CLT)",
+    x = "Ano",
+    y = "Razão média (Brancos / Negros)"
+  ) +
+  scale_x_continuous(breaks = c(2010, 2014, 2018)) +
+  scale_y_continuous(
+    limits = c(min(razao_clt_evolucao$razao_clt, na.rm = TRUE)*0.95, 
+               max(razao_clt_evolucao$razao_clt, na.rm = TRUE)*1.05),
+    breaks = scales::pretty_breaks(n = 5)
+  ) +
+  theme_minimal()
+
+
+##### EVOLUÇÃO DA RAZÃO TOTAL ENTRE SALÁRIOS DE BRANCOS E NEGROS ( SETOR PÚBLICO ) #####
+
+
+# Agregar por ano a razão do setor público
+razao_publico_evolucao <- aggregate(razao_publico ~ ano,
+                                    data = rais_agregada,
+                                    FUN = function(x) mean(x, na.rm = TRUE))
+
+# Gráfico setor público
+ggplot(razao_publico_evolucao, aes(x = ano, y = razao_publico)) +
+  geom_line(size = 1, color = "green") +
+  geom_point(size = 2, color = "red") +
+  labs(
+    title = "Evolução da razão entre salários de brancos e negros (Setor Público)",
+    x = "Ano",
+    y = "Razão média (Brancos / Negros)"
+  ) +
+  scale_x_continuous(breaks = c(2010, 2014, 2018)) +
+  scale_y_continuous(
+    limits = c(min(razao_publico_evolucao$razao_publico, na.rm = TRUE)*0.95,
+               max(razao_publico_evolucao$razao_publico, na.rm = TRUE)*1.05),
+    breaks = scales::pretty_breaks(n = 5)
+  ) +
+  theme_minimal()
+
+
+
+
+# A análise da RAIS entre 2010 e 2018 mostra diferenças consistentes nos salários médios de trabalhadores brancos e negros, tanto no setor privado quanto no setor público. Observando os gráficos de dispersão, nota-se que, na maioria dos municípios, os trabalhadores brancos recebem mais do que os negros, sendo essa diferença mais pronunciada no setor privado formal (CLT). No setor público, embora ainda existam disparidades, os salários são mais equilibrados, indicando que este setor atua como um moderador da desigualdade salarial racial.
+# Ao longo do período analisado, a razão entre os salários médios de brancos e negros permanece relativamente estável. 
+
+#Para o total de trabalhadores, os salários dos brancos foram, em média, entre 1,1 e 1,25 vezes maiores que os dos negros.
+#No setor CLT, a desigualdade persiste de forma semelhante, mostrando que a formalização do emprego não elimina a diferença racial nos rendimentos. Já no setor público, a razão é mais próxima de 1, demonstrando uma distribuição mais equitativa de salários, embora haja municípios com grandes disparidades.
+# Conclui-se que  os resultados indicam que infelizmente a desigualdade salarial racial entre os anos de 2010 e 2018 é uma característica persistente, independente do contrato e trabalho. 
+
